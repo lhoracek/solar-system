@@ -39,6 +39,9 @@
             color: #aaa;
             line-height: 1.5;
         }
+        #follow-status {
+            color: #ffd700 !important;
+        }
         #planet-label {
             position: absolute;
             top: 20px;
@@ -51,6 +54,29 @@
             border: 1px solid rgba(255, 255, 255, 0.1);
             display: none;
         }
+        #time-control {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 12px 16px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.8rem;
+        }
+        #time-control input {
+            width: 150px;
+            cursor: pointer;
+        }
+        #time-value {
+            min-width: 3em;
+            text-align: right;
+            color: #ffd700;
+        }
     </style>
 </head>
 <body>
@@ -58,8 +84,15 @@
     <div id="info">
         <h1>☀️ Solar System</h1>
         <p>Drag to rotate | Scroll to zoom | Right-click to pan</p>
+        <p>Click a planet or moon to follow it | Click empty space to release</p>
+        <p id="follow-status"></p>
     </div>
     <div id="planet-label"></div>
+    <div id="time-control">
+        <span>Time</span>
+        <input type="range" id="time-scale" min="0" max="1" step="0.001" value="0.316">
+        <span id="time-value">0.10x</span>
+    </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -468,16 +501,59 @@
         sunLight.position.set(0, 0, 0);
         scene.add(sunLight);
 
-        // Starfield
+        // Starfield: a general sprinkle of background stars plus a denser,
+        // patchy band representing the Milky Way. The galactic plane is
+        // really tilted about 60° from the ecliptic (the plane the planets
+        // orbit in, our world XZ plane) — that tilt is the accurate part.
+        // Which compass direction the band points at t=0 isn't, since this
+        // scene has no fixed celestial reference frame (no vernal equinox,
+        // no real right-ascension origin) to anchor it to.
         function createStarfield() {
             const geometry = new THREE.BufferGeometry();
             const vertices = [];
-            for (let i = 0; i < 10000; i++) {
-                const x = (Math.random() - 0.5) * 4000;
-                const y = (Math.random() - 0.5) * 4000;
-                const z = (Math.random() - 0.5) * 4000;
-                vertices.push(x, y, z);
+
+            const galacticTilt = 60.2 * Math.PI / 180;
+            const galacticNormal = new THREE.Vector3(0, Math.cos(galacticTilt), Math.sin(galacticTilt)).normalize();
+            const bandU = new THREE.Vector3(1, 0, 0);
+            const bandV = new THREE.Vector3().crossVectors(galacticNormal, bandU).normalize();
+
+            const STAR_COUNT = 14000;
+            const BAND_FRACTION = 0.7;
+            const BAND_HALF_WIDTH = 0.12; // radians of scatter either side of the galactic plane
+
+            const dir = new THREE.Vector3();
+
+            for (let i = 0; i < STAR_COUNT; i++) {
+                if (i < STAR_COUNT * BAND_FRACTION) {
+                    // Band stars: cluster near the galactic plane, with patchy
+                    // density along it (the real Milky Way isn't a uniform
+                    // ring — dust lanes and star clouds vary its brightness).
+                    let phi;
+                    let accepted = false;
+                    while (!accepted) {
+                        phi = Math.random() * Math.PI * 2;
+                        const patchiness = 0.55 + 0.25 * Math.sin(phi * 3 + 1.3) + 0.2 * Math.sin(phi * 7 - 2.1);
+                        accepted = Math.random() < Math.max(0.15, patchiness);
+                    }
+                    // Averaging three uniforms approximates a bell curve, so
+                    // scatter clusters near the plane rather than smearing evenly.
+                    const deviation = ((Math.random() + Math.random() + Math.random()) / 3 - 0.5) * 2 * BAND_HALF_WIDTH;
+                    dir.copy(bandU).multiplyScalar(Math.cos(phi))
+                        .addScaledVector(bandV, Math.sin(phi))
+                        .multiplyScalar(Math.cos(deviation))
+                        .addScaledVector(galacticNormal, Math.sin(deviation));
+                } else {
+                    // General background stars: uniform over the whole sky
+                    const z = Math.random() * 2 - 1;
+                    const theta = Math.random() * Math.PI * 2;
+                    const r = Math.sqrt(1 - z * z);
+                    dir.set(r * Math.cos(theta), z, r * Math.sin(theta));
+                }
+
+                const radius = 800 + Math.random() * 3200;
+                vertices.push(dir.x * radius, dir.y * radius, dir.z * radius);
             }
+
             geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
             const material = new THREE.PointsMaterial({ color: 0xffffff, size: 0.7, sizeAttenuation: true });
             const stars = new THREE.Points(geometry, material);
@@ -498,16 +574,59 @@
         const sunGlow = new THREE.Mesh(glowGeometry, glowMaterial);
         scene.add(sunGlow);
 
-        // Planet data: name, radius, distance, speed, textureFn
+        // Planet data: name, radius, distance, speed (orbit, real-period-proportional),
+        // spin (rotations per orbit, negative = retrograde), tilt (real axial
+        // tilt in degrees — the planet spins around this tilted axis, not the
+        // plain vertical), inclination (real tilt in degrees of the planet's
+        // *orbital* plane relative to the ecliptic — Earth defines the
+        // ecliptic, so its inclination is 0 by definition), textureFn,
+        // moons (real-ratio-derived; each orbits in its planet's equatorial
+        // plane by default — planeRef: 'ecliptic' and/or extraTilt override
+        // that for the few real moons whose orbital plane notably differs)
         const planetsData = [
-            { name: 'Mercury', radius: 1.2, distance: 15, speed: 0.04, textureFn: createMercuryTexture },
-            { name: 'Venus', radius: 2.0, distance: 22, speed: 0.028, textureFn: createVenusTexture },
-            { name: 'Earth', radius: 2.2, distance: 30, speed: 0.02, textureFn: createEarthTexture },
-            { name: 'Mars', radius: 1.6, distance: 40, speed: 0.015, textureFn: createMarsTexture },
-            { name: 'Jupiter', radius: 5.0, distance: 60, speed: 0.008, textureFn: createJupiterTexture },
-            { name: 'Saturn', radius: 4.2, distance: 80, speed: 0.006, textureFn: createSaturnTexture, hasRings: true },
-            { name: 'Uranus', radius: 3.0, distance: 100, speed: 0.004, textureFn: createUranusTexture },
-            { name: 'Neptune', radius: 2.8, distance: 120, speed: 0.003, textureFn: createNeptuneTexture }
+            { name: 'Mercury', radius: 1.2, distance: 15, speed: 0.083, spin: 1.5, tilt: 0.03, inclination: 7.00, textureFn: createMercuryTexture },
+            { name: 'Venus', radius: 2.0, distance: 22, speed: 0.0325, spin: -0.9247, tilt: 2.64, inclination: 3.39, textureFn: createVenusTexture },
+            { name: 'Earth', radius: 2.2, distance: 30, speed: 0.02, spin: 365.25, tilt: 23.44, inclination: 0, textureFn: createEarthTexture,
+                moons: [
+                    // The Moon orbits close to the ecliptic (not Earth's equator) —
+                    // a relic of its giant-impact origin, unlike most regular moons.
+                    { name: 'Moon', radius: 0.6, distance: 4, orbitSpeed: 0.268, planeRef: 'ecliptic', extraTilt: 5.14 }
+                ] },
+            { name: 'Mars', radius: 1.6, distance: 40, speed: 0.0106, spin: 669.6, tilt: 25.19, inclination: 1.85, textureFn: createMarsTexture,
+                moons: [
+                    { name: 'Phobos', radius: 0.15, distance: 2.2, orbitSpeed: 22.9 },
+                    { name: 'Deimos', radius: 0.12, distance: 3.3, orbitSpeed: 5.78 }
+                ] },
+            { name: 'Jupiter', radius: 5.0, distance: 60, speed: 0.00169, spin: 10485, tilt: 3.13, inclination: 1.30, textureFn: createJupiterTexture,
+                moons: [
+                    { name: 'Io', radius: 0.32, distance: 7, orbitSpeed: 4.13 },
+                    { name: 'Europa', radius: 0.28, distance: 9, orbitSpeed: 2.06 },
+                    { name: 'Ganymede', radius: 0.47, distance: 11, orbitSpeed: 1.02 },
+                    { name: 'Callisto', radius: 0.43, distance: 14, orbitSpeed: 0.44 }
+                ] },
+            { name: 'Saturn', radius: 4.2, distance: 80, speed: 0.000679, spin: 24232, tilt: 26.73, inclination: 2.49, textureFn: createSaturnTexture, hasRings: true,
+                moons: [
+                    { name: 'Rhea', radius: 0.14, distance: 9.0, orbitSpeed: 1.62 },
+                    { name: 'Titan', radius: 0.47, distance: 11.9, orbitSpeed: 0.46 },
+                    // Iapetus is a well-known outlier: notably inclined relative
+                    // to Saturn's equatorial plane, unlike Saturn's other major moons.
+                    { name: 'Iapetus', radius: 0.13, distance: 17.0, orbitSpeed: 0.09, extraTilt: 15.47 }
+                ] },
+            { name: 'Uranus', radius: 3.0, distance: 100, speed: 0.000238, spin: -42742, tilt: 97.77, inclination: 0.77, textureFn: createUranusTexture,
+                // Uranus's major moons orbit prograde relative to Uranus's own
+                // (retrograde) spin, so their orbitSpeed sign matches Uranus's
+                // spin sign, not the usual solar-orbit-direction sign.
+                moons: [
+                    { name: 'Miranda', radius: 0.12, distance: 8.5, orbitSpeed: -5.17 },
+                    { name: 'Ariel', radius: 0.17, distance: 9.6, orbitSpeed: -2.90 },
+                    { name: 'Umbriel', radius: 0.17, distance: 10.8, orbitSpeed: -1.76 },
+                    { name: 'Titania', radius: 0.23, distance: 12.7, orbitSpeed: -0.84 },
+                    { name: 'Oberon', radius: 0.22, distance: 14.0, orbitSpeed: -0.54 }
+                ] },
+            { name: 'Neptune', radius: 2.8, distance: 120, speed: 0.000121, spin: 89690, tilt: 28.32, inclination: 1.77, textureFn: createNeptuneTexture,
+                moons: [
+                    { name: 'Triton', radius: 0.38, distance: 6.5, orbitSpeed: -1.24 }
+                ] }
         ];
 
         const planets = [];
@@ -522,19 +641,56 @@
                 metalness: 0.05
             });
             const planet = new THREE.Mesh(geometry, material);
+            planet.userData.name = data.name;
 
-            // Orbit group
+            // Rotation axis indicator, shown only while this planet is followed
+            const axisLength = data.radius * 3;
+            const axisGeometry = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, -axisLength / 2, 0),
+                new THREE.Vector3(0, axisLength / 2, 0)
+            ]);
+            const axisLine = new THREE.Line(axisGeometry, new THREE.LineBasicMaterial({ color: 0x00ffff }));
+            axisLine.visible = false;
+            planet.add(axisLine);
+
+            // Axial tilt lives on its own group with a fixed rotation, one
+            // level above the planet mesh whose rotation.y is the continuous
+            // spin. Combining tilt and spin as two rotations on the SAME
+            // object would depend on THREE.Euler's axis-composition order —
+            // easy to get backwards, and if reversed, spin would rotate the
+            // tilt itself each frame instead of rotating around it, which is
+            // exactly the wobble this is meant to avoid. Nesting them in
+            // separate objects (parent tilt, child spin) makes the intended
+            // "spin happens around the tilted axis" composition unambiguous:
+            // the planet's local Y axis (pole, rings, axis line) is left
+            // untouched by its own rotation.y, then carried to a fixed
+            // tilted orientation by the unchanging parent transform.
+            const tiltGroup = new THREE.Group();
+            tiltGroup.rotation.z = (data.tilt || 0) * Math.PI / 180;
+            tiltGroup.add(planet);
+
+            // Orbit group: rotation.y here is the changing orbital angle.
             const orbitGroup = new THREE.Group();
-            orbitGroup.add(planet);
-            planet.position.x = data.distance;
-            scene.add(orbitGroup);
+            orbitGroup.add(tiltGroup);
+            tiltGroup.position.x = data.distance;
 
-            // Orbit path
+            // Orbital-plane inclination: a fixed tilt one level ABOVE
+            // orbitGroup, same reasoning as the axial tilt/spin split above —
+            // orbitGroup's rotation.y changes every frame (orbital motion),
+            // so the inclination has to be the unchanging parent, or the
+            // orbital plane itself would wobble instead of just being tilted.
+            const inclinationGroup = new THREE.Group();
+            inclinationGroup.rotation.z = (data.inclination || 0) * Math.PI / 180;
+            inclinationGroup.add(orbitGroup);
+            scene.add(inclinationGroup);
+
+            // Orbit path — parented the same way as the planet so the drawn
+            // ring actually matches the tilted plane the planet travels in.
             const orbitGeometry = new THREE.RingGeometry(data.distance - 0.1, data.distance + 0.1, 128);
             const orbitMaterial = new THREE.MeshBasicMaterial({ color: 0x444444, side: THREE.DoubleSide, transparent: true, opacity: 0.4 });
             const orbitRing = new THREE.Mesh(orbitGeometry, orbitMaterial);
             orbitRing.rotation.x = -Math.PI / 2;
-            scene.add(orbitRing);
+            inclinationGroup.add(orbitRing);
 
             // Saturn's rings
             if (data.hasRings) {
@@ -547,7 +703,12 @@
                     roughness: 0.8
                 });
                 const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-                ring.rotation.x = -Math.PI / 2.5;
+                // Flat and perpendicular to the planet's local Y axis, same as
+                // the equatorial plane the spin (rotation.y) happens around.
+                // Parented to the planet so it inherits its axial tilt; since
+                // the ring plane is perpendicular to the spin axis, spinning
+                // doesn't move the plane at all, so this doesn't wobble.
+                ring.rotation.x = -Math.PI / 2;
                 planet.add(ring);
             }
 
@@ -555,46 +716,196 @@
             planets.push({
                 mesh: planet,
                 orbitGroup: orbitGroup,
+                tiltGroup: tiltGroup,
+                inclinationGroup: inclinationGroup,
                 data: data,
+                axisLine: axisLine,
                 angle: Math.random() * Math.PI * 2
             });
         });
 
-        // Earth's moon with texture
+        // Moons, generalized across every planet with a `moons` entry. Each
+        // moon is parented into the planet's tilt/orbit hierarchy — NOT the
+        // spinning planet mesh itself, which would drag the moon's orbit
+        // around each frame — so it automatically inherits the planet's true
+        // position and orbital-plane orientation without any manual per-frame
+        // position copying. By default a moon anchors to tiltGroup (orbits in
+        // the planet's equatorial plane, real for almost all regular moons);
+        // planeRef: 'ecliptic' anchors to orbitGroup instead (the plane the
+        // planet itself orbits the Sun in, before axial tilt is applied) for
+        // the rare moon — Earth's — whose orbit ignores its planet's tilt.
+        // An extraTilt (degrees) adds a further fixed tilt on top of that
+        // reference plane, for moons whose real orbit deviates from it.
         const moonTexture = createMoonTexture();
-        const moonGeometry = new THREE.SphereGeometry(0.6, 32, 32);
-        const moonMaterial = new THREE.MeshStandardMaterial({ map: moonTexture, roughness: 0.9 });
-        const moon = new THREE.Mesh(moonGeometry, moonMaterial);
-        const earthPlanet = planets[2];
-        earthPlanet.mesh.add(moon);
-        moon.position.set(4, 0, 0);
+        const moons = [];
+
+        planets.forEach(p => {
+            (p.data.moons || []).forEach(moonData => {
+                const geometry = new THREE.SphereGeometry(moonData.radius, 32, 32);
+                const material = new THREE.MeshStandardMaterial({ map: moonTexture, roughness: 0.9 });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.userData.name = moonData.name;
+
+                // tiltGroup already sits at the planet's location (it carries
+                // the sun-distance offset), so equatorial-referenced moons
+                // need no extra positioning. orbitGroup's origin is the SUN's
+                // point in the orbital plane, not the planet — so an
+                // ecliptic-referenced moon (just Earth's) needs an explicit
+                // offset to actually anchor on the planet instead of the Sun.
+                const eclipticRef = moonData.planeRef === 'ecliptic';
+                const basePlane = eclipticRef ? p.orbitGroup : p.tiltGroup;
+                const anchor = new THREE.Group();
+                if (eclipticRef) {
+                    anchor.position.x = p.data.distance;
+                }
+                if (moonData.extraTilt) {
+                    anchor.rotation.x = moonData.extraTilt * Math.PI / 180;
+                }
+                basePlane.add(anchor);
+                anchor.add(mesh);
+
+                moons.push({
+                    mesh,
+                    anchor,
+                    planet: p,
+                    distance: moonData.distance,
+                    orbitSpeed: moonData.orbitSpeed,
+                    angle: Math.random() * Math.PI * 2
+                });
+            });
+        });
+
+        const followableBodies = [...planets, ...moons];
+
+        // Camera follow: while a body is followed, the camera's orbit target
+        // is pinned to it every frame, and the camera's offset is rotated
+        // around a pivot by the same angle the body advanced this frame — the
+        // Sun for a planet, its host planet for a moon — so the camera keeps
+        // a constant bearing relative to that pivot (instead of drifting as
+        // the body sweeps around its orbit). Free drag/zoom still works since
+        // it's layered on top by OrbitControls' own update() each frame.
+        let followedBody = null;
+        const SUN_POS = new THREE.Vector3(0, 0, 0);
+        const followWorldPos = new THREE.Vector3();
+        const followPivotPos = new THREE.Vector3();
+        const followNormal = new THREE.Vector3();
+        const followQuat = new THREE.Quaternion();
+        const prevPivotWorldPos = new THREE.Vector3();
+        const followStatus = document.getElementById('follow-status');
+
+        function getFollowPivot(body) {
+            if (moons.includes(body)) {
+                body.planet.mesh.getWorldPosition(followPivotPos);
+                return followPivotPos;
+            }
+            return SUN_POS;
+        }
+
+        // The orbital plane isn't always the flat world XZ plane anymore
+        // (planets have real orbital inclinations, moons follow their
+        // planet's equatorial tilt) — so the axis to rotate the camera's
+        // offset around is whichever group's local Y axis the body actually
+        // revolves around, mapped into world space, not a fixed world axis.
+        function getOrbitNormal(body) {
+            const anchor = moons.includes(body) ? body.anchor : body.inclinationGroup;
+            anchor.getWorldQuaternion(followQuat);
+            return followNormal.set(0, 1, 0).applyQuaternion(followQuat);
+        }
+
+        function followBody(body) {
+            // Only show the rotation-axis indicator for planets (moons in
+            // this sim don't animate a spin, so they have no axis line).
+            if (followedBody && followedBody.axisLine) {
+                followedBody.axisLine.visible = false;
+            }
+
+            followedBody = body;
+            if (body) {
+                body.mesh.getWorldPosition(followWorldPos);
+                controls.target.copy(followWorldPos);
+                prevPivotWorldPos.copy(getFollowPivot(body));
+                followStatus.textContent = `Following ${body.mesh.userData.name}`;
+                if (body.axisLine) {
+                    body.axisLine.visible = true;
+                }
+            } else {
+                followStatus.textContent = '';
+            }
+        }
 
         // Animation
-        let moonAngle = 0;
+        // Slider position (0-1) is squared so low speeds get much finer control
+        // than a linear slider would give, while still reaching full speed at 1.
+        function sliderToTimeScale(t) {
+            return t * t;
+        }
+        let timeScale = sliderToTimeScale(0.316);
 
         function animate() {
             requestAnimationFrame(animate);
 
-            // Rotate sun
-            sun.rotation.y += 0.002;
+            // Rotate sun (real ~27-day rotation period)
+            sun.rotation.y += 0.27 * timeScale;
 
             // Animate planets
             planets.forEach(p => {
-                p.angle += p.data.speed;
+                p.angle += p.data.speed * timeScale;
                 p.orbitGroup.rotation.y = p.angle;
-                p.mesh.rotation.y += 0.005;
+                p.mesh.rotation.y += p.data.speed * (p.data.spin || 1) * timeScale;
             });
 
-            // Animate moon around Earth
-            moonAngle += 0.03;
-            moon.position.x = Math.cos(moonAngle) * 4;
-            moon.position.z = Math.sin(moonAngle) * 4;
+            // Animate moons: each moon is a real child of its planet's tilt
+            // (or orbit) group, so it automatically inherits the planet's
+            // current position and orbital-plane orientation — only its own
+            // position within that local plane needs updating here. Uses the
+            // same (x = cos, z = -sin) handedness as planets' own
+            // Object3D.rotation.y orbits, so a positive orbitSpeed means
+            // "prograde in the same sense as the rest of the system."
+            moons.forEach(m => {
+                m.angle += m.orbitSpeed * timeScale;
+                m.mesh.position.x = Math.cos(m.angle) * m.distance;
+                m.mesh.position.z = -Math.sin(m.angle) * m.distance;
+            });
+
+            // Keep the camera locked onto the followed body's reference frame
+            if (followedBody) {
+                const isMoon = moons.includes(followedBody);
+                const pivotPos = getFollowPivot(followedBody);
+
+                // Carry the camera along with any movement of the pivot itself
+                // (the Sun never moves, so this is a no-op for planets).
+                camera.position.add(pivotPos.clone().sub(prevPivotWorldPos));
+
+                // Rotate the camera's offset from the pivot by the angle the
+                // body advanced this frame, around that body's actual orbital
+                // axis (which may be tilted by inclination/axial tilt), so it
+                // keeps a constant bearing relative to the tilted plane
+                // instead of drifting off it.
+                const dAngle = (isMoon ? followedBody.orbitSpeed : followedBody.data.speed) * timeScale;
+                const axis = getOrbitNormal(followedBody);
+                const offset = camera.position.clone().sub(pivotPos);
+                offset.applyAxisAngle(axis, dAngle);
+                camera.position.copy(pivotPos).add(offset);
+
+                followedBody.mesh.getWorldPosition(followWorldPos);
+                controls.target.copy(followWorldPos);
+                prevPivotWorldPos.copy(pivotPos);
+            }
 
             controls.update();
             renderer.render(scene, camera);
         }
 
         animate();
+
+        // Time scale slider
+        const timeSlider = document.getElementById('time-scale');
+        const timeValue = document.getElementById('time-value');
+        timeSlider.addEventListener('input', (event) => {
+            timeScale = sliderToTimeScale(parseFloat(event.target.value));
+            const decimals = timeScale < 0.01 ? 4 : 2;
+            timeValue.textContent = timeScale.toFixed(decimals) + 'x';
+        });
 
         // Resize handler
         window.addEventListener('resize', () => {
@@ -613,24 +924,45 @@
             mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
             raycaster.setFromCamera(mouse, camera);
-            const meshes = planets.map(p => p.mesh);
-            const intersects = raycaster.intersectObjects(meshes);
+            const planetMeshes = planets.map(p => p.mesh);
+            const moonMeshes = moons.map(m => m.mesh);
+            const intersects = raycaster.intersectObjects([...planetMeshes, ...moonMeshes]);
 
             if (intersects.length > 0) {
-                const planetName = intersects[0].object.userData.name ||
-                    planets.find(p => p.mesh === intersects[0].object)?.data.name;
-                if (planetName) {
-                    label.textContent = `🪐 ${planetName}`;
-                    label.style.display = 'block';
-                }
+                const hit = intersects[0].object;
+                const icon = moonMeshes.includes(hit) ? '🌙' : '🪐';
+                label.textContent = `${icon} ${hit.userData.name}`;
+                label.style.display = 'block';
             } else {
                 label.style.display = 'none';
             }
         });
 
-        // Assign names to planet meshes for raycasting
-        planets.forEach(p => {
-            p.mesh.userData.name = p.data.name;
+        // Click a planet/moon to follow it; click empty space to release.
+        // Ignores clicks that end a drag (OrbitControls rotate), and only
+        // reacts to clicks on the canvas itself, not the UI overlays.
+        let mouseDownPos = null;
+        renderer.domElement.addEventListener('mousedown', (event) => {
+            mouseDownPos = { x: event.clientX, y: event.clientY };
+        });
+
+        renderer.domElement.addEventListener('click', (event) => {
+            if (mouseDownPos && Math.hypot(event.clientX - mouseDownPos.x, event.clientY - mouseDownPos.y) > 5) {
+                return;
+            }
+
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(followableBodies.map(b => b.mesh));
+
+            if (intersects.length > 0) {
+                const hit = intersects[0].object;
+                followBody(followableBodies.find(b => b.mesh === hit));
+            } else {
+                followBody(null);
+            }
         });
     </script>
 </body>
