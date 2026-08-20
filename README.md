@@ -4,7 +4,7 @@ Interactive 3D solar system visualization deployed at [solarsystem.lhoracek.cz](
 
 ## Implementation
 
-- The project is a single static page in `/home/runner/work/solar-system/solar-system/index.html`.
+- The project is a single static page in `index.html`.
 - Rendering is done with Three.js and OrbitControls loaded from CDNs.
 - Planet, moon, and sun textures are generated procedurally with canvas drawing code instead of image assets.
 - The scene models:
