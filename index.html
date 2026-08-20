@@ -632,7 +632,8 @@
                     { name: 'Ganymede', radius: 0.47, distance: 11, orbitSpeed: 1.02 },
                     { name: 'Callisto', radius: 0.43, distance: 14, orbitSpeed: 0.44 }
                 ] },
-            { name: 'Saturn', radius: 4.2, distance: 80, speed: 0.000679, spin: 24232, tilt: 26.73, inclination: 2.49, textureFn: createSaturnTexture, hasRings: true,
+            { name: 'Saturn', radius: 4.2, distance: 80, speed: 0.000679, spin: 24232, tilt: 26.73, inclination: 2.49, textureFn: createSaturnTexture,
+                hasRings: true, ringInner: 1, ringOuter: 3.5, ringColor: 0xc8b88a, ringOpacity: 0.7,
                 moons: [
                     { name: 'Rhea', radius: 0.14, distance: 9.0, orbitSpeed: 1.62 },
                     { name: 'Titan', radius: 0.47, distance: 11.9, orbitSpeed: 0.46 },
@@ -652,6 +653,10 @@
                     { name: 'Oberon', radius: 0.22, distance: 14.0, orbitSpeed: -0.54 }
                 ] },
             { name: 'Neptune', radius: 2.8, distance: 120, speed: 0.000121, spin: 89690, tilt: 28.32, inclination: 1.77, textureFn: createNeptuneTexture,
+                // Neptune's rings (Galle, Le Verrier, Lassell, Arago, Adams) are
+                // real but nothing like Saturn's: narrow, sparse, and made of
+                // dark dusty material, so they're rendered thin, dark, and faint.
+                hasRings: true, ringInner: 0.6, ringOuter: 1.1, ringColor: 0x554f66, ringOpacity: 0.25,
                 moons: [
                     { name: 'Triton', radius: 0.38, distance: 6.5, orbitSpeed: -1.24 }
                 ] }
@@ -720,14 +725,14 @@
             orbitRing.rotation.x = -Math.PI / 2;
             inclinationGroup.add(orbitRing);
 
-            // Saturn's rings
+            // Planetary rings (Saturn, Neptune)
             if (data.hasRings) {
-                const ringGeometry = new THREE.RingGeometry(data.radius + 1, data.radius + 3.5, 64);
+                const ringGeometry = new THREE.RingGeometry(data.radius + data.ringInner, data.radius + data.ringOuter, 64);
                 const ringMaterial = new THREE.MeshStandardMaterial({
-                    color: 0xc8b88a,
+                    color: data.ringColor,
                     side: THREE.DoubleSide,
                     transparent: true,
-                    opacity: 0.7,
+                    opacity: data.ringOpacity,
                     roughness: 0.8
                 });
                 const ring = new THREE.Mesh(ringGeometry, ringMaterial);
